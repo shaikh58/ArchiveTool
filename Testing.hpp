@@ -3,6 +3,8 @@
 //
 //  Created by rick gessner on 1/24/23.
 //
+//  Updated on March 14, 2024
+//
 
 #ifndef Testing_h
 #define Testing_h
@@ -15,7 +17,6 @@
 #include <map>
 #include <filesystem>
 #include <cstring>
-#include <chrono>
 
 //If you are having trouble with this line make sure you are using C++17
 namespace fs = std::filesystem;
@@ -65,7 +66,9 @@ namespace ECE141 {
             makeFile(folder + "/mediumA.txt", 1780);
             makeFile(folder + "/mediumB.txt", 1780);
             makeFile(folder + "/largeA.txt", 2640);
+            makeFile(folder + "/XlargeA.txt", 264000);
             makeFile(folder + "/largeB.txt", 2640);
+            makeFile(folder + "/XlargeB.txt", 264000);
         }
 
         Testing(const std::string& aFolder) : folder(aFolder) {
@@ -124,17 +127,20 @@ namespace ECE141 {
         }
 
         size_t addTestFile(Archive& anArchive,
-                           const std::string& aName, char aChar = 'A') {
+                           const std::string& aName, char aChar = 'A',
+                           IDataProcessor* aProcessor = nullptr) {
             std::string theFullPath(folder + '/' + aName + aChar + ".txt");
-            anArchive.add(theFullPath);
+            anArchive.add(theFullPath, aProcessor);
             return 1;
         }
 
-        size_t addTestFiles(Archive& anArchive, char aChar = 'A') {
-            addTestFile(anArchive, "small", aChar);
-            addTestFile(anArchive, "medium", aChar);
-            addTestFile(anArchive, "large", aChar);
-            return 3;
+        size_t addTestFiles(Archive& anArchive, char aChar = 'A',
+                            IDataProcessor* aProcessor = nullptr) {
+            addTestFile(anArchive, "small", aChar, aProcessor);
+            addTestFile(anArchive, "medium", aChar, aProcessor);
+            addTestFile(anArchive, "large", aChar, aProcessor);
+            addTestFile(anArchive, "Xlarge", aChar, aProcessor);
+            return 4;
         }
 
         size_t getFileSize(const std::string& aFilePath) {
@@ -147,8 +153,12 @@ namespace ECE141 {
 
         bool hasMinSize(const std::string& aFilePath, size_t aMinSize) {
             size_t theSize = getFileSize(aFilePath);
-            auto theTest = theSize - aMinSize;
-            return (theSize - aMinSize) <= kMinBlockSize; //ok to have one extra block
+            return theSize >= aMinSize;
+        }
+
+        bool hasMaxSize(const std::string& aFilePath, size_t aMinSize) {
+            size_t theSize = getFileSize(aFilePath);
+            return theSize <= aMinSize;
         }
 
         size_t countLines(const std::string &anOutput) {
@@ -198,9 +208,10 @@ namespace ECE141 {
                 return false;
             }
             else {
-                theResult = hasMinSize(theFullPath, 6144);
+                theResult = hasMinSize(theFullPath, 270144);
                 if(!theResult) anOutput << "Archive is too small\n";
             }
+
             return theResult;
         }
 
@@ -230,7 +241,7 @@ namespace ECE141 {
                 std::getline(theFile2, theLine2);
                 theResult=theLine1==theLine2;
             }
-            return true;
+            return theResult;
         }
 
         bool doExtractTests(std::ostream& anOutput) {
@@ -311,7 +322,8 @@ namespace ECE141 {
                     std::stringstream theStream;
                     theArchive.getValue()->list(theStream);
                     std::string theOutput = theStream.str();
-                    theResult = verifyRemove(theFileName, 2, theOutput);
+                    theResult = verifyRemove(theFileName, 3, theOutput);
+                    anOutput << theOutput;
                     if(!theResult) anOutput << "remove file failed\n";
                 }
                 else{
@@ -403,9 +415,11 @@ namespace ECE141 {
                         addTestFiles(*theArchive.getValue(), 'A');
                         addTestFiles(*theArchive.getValue(), 'B');
                         std::stringstream theStream;
-                        if (12 == theArchive.getValue()->debugDump(theStream).getValue()) {
+                        auto debugCount = theArchive.getValue()->debugDump(theStream).getValue();
+                        if (530 <= debugCount && debugCount <= 592) {
                             theResult = verifyDump(theStream.str());
                         }
+                        anOutput << theStream.str();
                     }
                     else{
                         anOutput << "Failed to create archive\n";
@@ -415,7 +429,7 @@ namespace ECE141 {
 
                 if (theResult) {
                     std::string theArcName(folder + "/dumptest.arc");
-                    theResult = hasMinSize(theArcName, 1024 * 12);
+                    theResult = hasMinSize(theArcName, 1024 * 542);
                 }
             }
             theTracker.reportLeaks(anOutput);
@@ -488,6 +502,7 @@ namespace ECE141 {
                 std::string theOutFileName(folder + "/out.txt");
                 size_t theIndex = rand() % stressList.size();
                 std::string theName = stressList[theIndex];
+                auto theSize = getFileSize(theName);
                 anArchive.extract(theName, theOutFileName);
                 return filesMatch(theName, theOutFileName);
             }
@@ -543,7 +558,7 @@ namespace ECE141 {
                 stressList.push_back("mediumB.txt");
                 stressList.push_back("largeB.txt");
 
-                size_t theOpCount = 500;
+                size_t theOpCount = 100;
                 static ActionType theCalls[] = {
                         ActionType::added,
                         ActionType::removed,
@@ -566,7 +581,7 @@ namespace ECE141 {
                     }
                 } //while
             }
-            std::cout << "Done with stress operations" << std::endl;
+
             if (theResult) {
 
                 ArchiveStatus<std::shared_ptr<Archive>> theArchive = Archive::openArchive(thePath);
@@ -603,9 +618,77 @@ namespace ECE141 {
                 case ActionType::removed: std::cerr << "remove "; break;
                 case ActionType::listed: std::cerr << "list "; break;
                 case ActionType::dumped: std::cerr << "dump "; break;
-                case ActionType::compacted: std::cerr << "compact "; break;
             }
             std::cerr << aName << "\n";
+        }
+
+        bool doCompressTests(std::ostream& anOutput) {
+            bool theResult = false;
+            std::string theFullPath(folder + "/compressTest.arc");
+            size_t  theCount = 0;
+            size_t  theAddCount = 0;
+
+            { // block to limit scope of theArchive...
+                ArchiveStatus<std::shared_ptr<Archive>> theArchive = Archive::createArchive(theFullPath);
+                if (theArchive.isOK()) {
+                    std::shared_ptr<ArchiveObserver> theObserver = std::make_shared<Testing>(*this);
+                    IDataProcessor* theProcessor = new Compression();
+                    theArchive.getValue()->addObserver(theObserver);
+                    addTestFile(*theArchive.getValue(), "Xlarge", 'B', theProcessor);
+                    addTestFile(*theArchive.getValue(), "small", 'A', theProcessor);
+                    addTestFile(*theArchive.getValue(), "Xlarge", 'A', theProcessor);
+                    addTestFile(*theArchive.getValue(), "medium", 'A', theProcessor);
+                    addTestFile(*theArchive.getValue(), "small", 'B');
+                    addTestFile(*theArchive.getValue(), "large", 'A' ,theProcessor);
+                    addTestFile(*theArchive.getValue(), "medium", 'B', theProcessor);
+                    addTestFile(*theArchive.getValue(), "large", 'B' );
+                    theAddCount = 8;
+                }
+                else{
+                    anOutput << "Failed to create archive\n";
+                    return false;
+                }
+            }
+            {
+                ArchiveStatus<std::shared_ptr<Archive>> theArchive = Archive::openArchive(theFullPath);
+                if(theArchive.isOK()) {
+                    std::stringstream theStream;
+                    theArchive.getValue()->list(theStream);
+                    theCount=countLines(theStream.str());
+                }
+                else{
+                    anOutput << "Failed to open archive\n";
+                    return false;
+                }
+            }
+            if (theCount == 0 || theCount != theAddCount) {
+                anOutput << "Archive doesn't have enough elements\n";
+                return false;
+            }
+            else {
+                theResult = hasMaxSize(theFullPath, 540288/2);
+                if(!theResult) {
+                    anOutput << "Archive is too small\n";
+                    return false;
+                }
+            }
+            // now extract all files and compare to originals
+            {
+                ArchiveStatus<std::shared_ptr<Archive>> theArchive = Archive::openArchive(theFullPath);
+                if (theArchive.isOK()) {
+                    std::stringstream theStream;
+                    std::string theFileName = pickRandomFile();
+                    std::string temp(folder + "/out.txt");
+                    theArchive.getValue()->extract(theFileName, temp);
+                    theResult = filesMatch(theFileName, temp);
+                    if(!theResult) {
+                        anOutput << "Extracted file do not match original\n";
+                        return theResult;
+                    }
+                }
+            }
+
+            return theResult;
         }
 
     };

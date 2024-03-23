@@ -1,8 +1,6 @@
 //
 //  main.cpp
 //
-//
-//
 
 #include <iostream>
 #include <sstream>
@@ -29,25 +27,26 @@ int main(int argc, const char * argv[]) {
 
         using TestCall = std::function<bool()>;
         static std::map<std::string, TestCall> theCalls {
-          {"Compile", [&](){return true;}  },
-          {"Create",  [&](){return theTester.doCreateTests(theOutput);}  },
-          {"Open",    [&](){return theTester.doOpenTests(theOutput);}  },
-          {"Add",     [&](){return theTester.doAddTests(theOutput);}  },
-          {"Extract", [&](){return theTester.doExtractTests(theOutput);}  },
-          {"Remove",  [&](){return theTester.doRemoveTests(theOutput);}  },
-          {"List",    [&](){return theTester.doListTests(theOutput);}  },
-          {"Dump",    [&](){return theTester.doDumpTests(theOutput);}  },
-          {"Stress",  [&](){return theTester.doStressTests(theOutput);}  },
-          {"All",     [&](){return theTester.doAllTests(theOutput);}  },
+                {"Compile", [&](){return true;}  },
+                {"Create",  [&](){return theTester.doCreateTests(theOutput);}  },
+                {"Open",    [&](){return theTester.doOpenTests(theOutput);}  },
+                {"Add",     [&](){return theTester.doAddTests(theOutput);}  },
+                {"Extract", [&](){return theTester.doExtractTests(theOutput);}  },
+                {"Remove",  [&](){return theTester.doRemoveTests(theOutput);}  },
+                {"List",    [&](){return theTester.doListTests(theOutput);}  },
+                {"Dump",    [&](){return theTester.doDumpTests(theOutput);}  },
+                {"Stress",  [&](){return theTester.doStressTests(theOutput);}  },
+                {"Compress",  [&](){return theTester.doCompressTests(theOutput);}  },
+                {"All",     [&](){return theTester.doAllTests(theOutput);}  },
         };
 
         std::string theCmd(argv[1]);
         if(theCalls.count(theCmd)) {
-          bool theResult = theCalls[theCmd]();
-          const char* theStatus[]={"FAIL","PASS"};
-          std::cout << theCmd << " test " << theStatus[theResult] << "\n";
-          std::cout << "------------------------------\n"
-            << theOutput.str() << "\n";
+            bool theResult = theCalls[theCmd]();
+            const char* theStatus[]={"FAIL","PASS"};
+            std::cout << theCmd << " test " << theStatus[theResult] << "\n";
+            std::cout << "------------------------------\n"
+                      << theOutput.str() << "\n";
         }
         else std::cout << "Unknown test\n";
 

@@ -35,7 +35,6 @@ namespace ECE141 {
     void Archive::reconstructTOC() {
         for(size_t i=0; i<arcNumBlocks; i++){
             Block aBlock;
-//            arcFileStream.read(reinterpret_cast<char *>(&aBlock.header), sizeof(aBlock.header));
             arcBlockHandler.getAsBlock(aBlock, 0, arcFileStream, i, *this, StreamType::Archive);
             if(!aBlock.header.isEmpty){
                 arcTOC.mapTOC.insert(std::pair<std::string, size_t>(std::string(aBlock.header.blockFileName), aBlock.header.blockIndex));
@@ -65,18 +64,46 @@ namespace ECE141 {
         }
     }
 
-    size_t getStreamNumBlocks(std::fstream& aStream){
+    size_t getStreamNumBlocks(std::fstream& aStream, StreamType theStreamType){
         aStream.seekp(0, std::ios::end); // set ptr to end
         size_t fileLen = aStream.tellp();
-        size_t numBlocksNeeded = fileLen / kBlockSize + 1;
+        size_t numBlocksNeeded;
+        switch (theStreamType){
+            case StreamType::Archive:
+                numBlocksNeeded = (fileLen / kBlockSize) + 1;
+                break;
+            case StreamType::NonArchive:
+                numBlocksNeeded = (fileLen / (kBlockSize - headerSize)) + 1;
+        }
+
         aStream.seekp(0, std::ios::beg); // reset to beginning
         return numBlocksNeeded;
     }
 
-    Header::Header(size_t _blockIndex, size_t _nextBlockIndex, size_t _blockDataLen, bool _isEmpty) :
-    blockIndex(_blockIndex), nextBlockIndex(_nextBlockIndex), blockDataLen(_blockDataLen), isEmpty(_isEmpty)
+    std::vector<Block> BlockHandler::getProcessedBlocks(Archive& theArchive){
+        std::vector<Block> processedBlocks;
+        theArchive.arcFileStream.seekp(0, std::ios::end); // set ptr to end
+        for(size_t i=0; i<theArchive.arcNumBlocks; i++){
+            Block aBlock;
+            getAsBlock(aBlock, 0, theArchive.arcFileStream, i, theArchive, StreamType::Archive);
+            if(aBlock.header.isProcessed){
+                processedBlocks.push_back(aBlock);
+            }
+        }
+        return processedBlocks;
+    }
+
+    Header::Header() : blockIndex(-1), nextBlockIndex(-1), blockDataLen(0), isEmpty(false), isProcessed(false)
     {
         std::memset(blockFileName, nullChar, sizeof(blockFileName));
+        std::memset(processorType, nullChar, sizeof(processorType));
+    }
+
+    ProcessorType BlockHandler::getProcessorType(const char* processorName){
+        std::map<const char*, ProcessorType> theProcessorMap = {
+                {"comp",ProcessorType::Compression}
+        };
+        return theProcessorMap[processorName];
     }
 
     ArchiveStatus<Block> BlockHandler::getAsBlock(Block &aBlock, size_t streamPos, std::fstream& anFStream, size_t arcPos, Archive& theArchive, StreamType theStreamType) {
@@ -85,7 +112,6 @@ namespace ECE141 {
             theArchive.arcFileStream.seekp(arcPos * kBlockSize); // at the header
             auto currLoc = theArchive.arcFileStream.tellp();
             theArchive.arcFileStream.read(reinterpret_cast<char *>(&aBlock), sizeof(aBlock));
-//            std::cout << aBlock.header.blockFileName << std::endl;
             theArchive.arcFileStream.clear();
         }
         else{ // in a normal filestream, there is no header data
@@ -94,7 +120,8 @@ namespace ECE141 {
             auto theStartPtrloc = anFStream.tellp();
             anFStream.read((char *) aBlock.data, kBlockSize - sizeof(aBlock.header));
             aBlock.header.blockDataLen = anFStream.gcount();
-            aBlock.header.isEmpty = false;
+            aBlock.header.isEmpty = false; // note: this is already false when the Header object is initialized
+            // , so we don't need to explicitly set any indicators to false e.g. isCompressed
             anFStream.clear();
         }
         return ArchiveStatus<Block>(aBlock);
@@ -112,8 +139,7 @@ namespace ECE141 {
             auto theStatus = getAsBlock(aBlock, thePos, theArchive.arcFileStream, thePos, theArchive,
                                         StreamType::Archive);
             aBlock = theStatus.getValue();
-            auto result = isBlockEmpty(aBlock, thePos);
-            if(result){
+            if(isBlockEmpty(aBlock, thePos)){
                 emptyBlocks.push_back(aBlock);
             }
         }
@@ -131,7 +157,9 @@ namespace ECE141 {
         else {
             // only write blockDataLen amount of data (i.e. don't write padding characters)
             // and don't change pointer settings as this is variable length
-            anFStream.write((const char *) aBlock.data, aBlock.header.blockDataLen);
+            auto theLoc = anFStream.tellp();
+            bool theRes = anFStream.fail();
+            anFStream.write((const char*) aBlock.data, aBlock.header.blockDataLen);
             auto theCount = anFStream.gcount();
             anFStream.clear();
         }
@@ -148,7 +176,7 @@ namespace ECE141 {
         return mapTOC[blockFilePath];
     }
 
-    ArchiveStatus<bool> Archive::add(const std::string &aFilename){
+    ArchiveStatus<bool> Archive::add(const std::string &aFilename, IDataProcessor* aProcessor){
         // check that a file with the same name doesn't already exist
         if(arcTOC.mapTOC.find(aFilename) != arcTOC.mapTOC.end()) {
             return ArchiveStatus<bool>(ArchiveErrors::fileExists);
@@ -157,7 +185,23 @@ namespace ECE141 {
                              std::fstream::in | std::fstream::out;
         std::fstream theStream;
         theStream.open(aFilename, theFileMode);
-        size_t numBlocksNeeded = getStreamNumBlocks(theStream);
+        theStream.seekp(0);
+
+        // --------------- Processing  ----------------
+
+        // processing opens the input file to compress and saves processed result to temp output file, which getAsBlock will read in below
+        if(aProcessor){
+            aProcessor->process(aFilename);
+            // now update the stream to be the processed file rather than the original input file
+            theStream.close();
+            std::string destFilePath{aFilename};
+            destFilePath.insert(aFilename.length()-4,"_processed");
+            theStream.open(destFilePath, theFileMode);
+            // NOTE: the blocks metadata for isProcessed is updated below just before getAsBlock
+        }
+        // ---------------- End processing  ------------
+
+        size_t numBlocksNeeded = getStreamNumBlocks(theStream, StreamType::NonArchive);
 
         // get the empty blocks first
         std::vector<Block> emptyBlocks = arcBlockHandler.getEmptyBlocks(*this);
@@ -169,27 +213,21 @@ namespace ECE141 {
             theBlock.header.blockIndex = thePos;
             if(i < numBlocksNeeded - 1){ theBlock.header.nextBlockIndex = thePos + 1; }
             else{ theBlock.header.nextBlockIndex = thePos; }
-            theBlock.header.isEmpty = false;
             arcNumBlocks++;
-            // use empty blocks first
-            if(i < emptyBlocks.size() && !emptyBlocks.empty()){
-                // link the empty blocks
-                if(i >= 1){
-                    emptyBlocks[i-1].header.nextBlockIndex = emptyBlocks[i].header.blockIndex;
-                }
-                if(i == emptyBlocks.size() - 1){
-                    // last empty block points to new block at end of archive if same file
-                    emptyBlocks[i].header.nextBlockIndex = thePos;
-                }
-                theBlock = emptyBlocks[i];
-                thePos = theBlock.header.blockIndex;
-                arcNumBlocks--; // don't increment the numBlocks counter if using an existing empty block
-                theBlock.header.isEmpty = false;
-            }
-            std::strcpy(theBlock.header.blockFileName, aFilename.c_str()); // whether its empty or new block, the filename should be reset
 
+            std::strcpy(theBlock.header.blockFileName, aFilename.c_str()); // whether its empty or new block, the filename should be explicitly set
+
+            // ----------------- Processing ----------------------
+            if(aProcessor) {
+                theBlock.header.isProcessed = true;
+                // figure out which processor was called and enter the name into header.processorType
+                if(typeid(*aProcessor) == typeid(Compression)){
+                    std::strcpy(theBlock.header.processorType, "comp");
+                }
+            }
             auto theStatus = arcBlockHandler.getAsBlock(theBlock, i, theStream, thePos, *this,
                                                         StreamType::NonArchive);
+
             // blockDataLen is updated inside getAsBlock so when writing to stream, we only write that much data
             theStatus.getValue(); // does error checking
             auto theWriteStatus = arcBlockHandler.writeToStream(theBlock, i,theStream,
@@ -209,24 +247,61 @@ namespace ECE141 {
 
     ArchiveStatus<bool> Archive::extract(const std::string &aFilename, const std::string &aFullPath){
         // lookup filename in TOC, then iterate over all linked blocks using header.nextBlockIndex
-        auto theFileMode = std::fstream::binary | std::fstream::in | std::fstream::out;
-        std::fstream theStream(aFullPath, theFileMode);
+        auto theFileMode = std::fstream::binary | std::fstream::out;
+        std::fstream theStream;
+        theStream.open(aFullPath, theFileMode);
+        auto theLoc = theStream.tellp();
+        auto theLoc2 = theStream.tellg();
         auto fullFilenamePath = aFilename;
         if(fullFilenamePath.find(arcFolder) == std::string::npos){ fullFilenamePath = arcFolder + "/" + aFilename; }
+        // get the starting block index of all blocks that contain the file that is requested
         auto blockIndex = arcTOC.getBlockIndex(fullFilenamePath);
+        std::string destFilePath{aFullPath};
+        int c = 0;
         while(true){
             Block theBlock;
             auto theStatus = arcBlockHandler.getAsBlock(theBlock, blockIndex,
                                                         arcFileStream, blockIndex, *this, StreamType::Archive);
             theStatus.getValue(); // does error checking
+
+            // if the block was processed, write it to a temp file, then (later) read that in, reverse the processing,
+            // and write to the desired input filename
+            if(theBlock.header.isProcessed && c==0) {
+                theStream.close();
+                destFilePath.insert(aFullPath.length()-4,"_reverse_process");
+                theStream.open(destFilePath, theFileMode);
+                theStream.seekp(0,std::ios::beg);
+            }
+
             // streamPos doesn't need to be updated as it simply keeps moving along the stream as data is written to it
             auto theWriteStatus = arcBlockHandler.writeToStream(theBlock, 0,
                                                                 theStream, blockIndex, *this, StreamType::NonArchive);
+            // terminating condition is if there is no next block for the requested file
             if(theBlock.header.nextBlockIndex == theBlock.header.blockIndex){
+
+                //------------------ Reverse Processing --------------------
+                // if a file was processed when adding, find which processor was called and reverse the processing
+                if(theBlock.header.isProcessed) {
+                    IDataProcessor *aProcessor = nullptr;
+                    ProcessorType processorType = arcBlockHandler.getProcessorType(
+                            theBlock.header.processorType); // returns enum class type
+                    switch (processorType) {
+                        case ProcessorType::Compression:
+                            aProcessor = new Compression();
+                            break;
+                    }
+                    theStream.close();
+                    aProcessor->reverseProcess(aFullPath);
+                    delete aProcessor;
+                }
+                //----------------- End reverse processing -------------------
+
                 notifyObservers(ActionType::extracted, aFilename, true);
+                theStream.close();
                 return ArchiveStatus<bool>(true);
             }
             blockIndex = theBlock.header.nextBlockIndex;
+            c++;
         }
         notifyObservers(ActionType::extracted, aFilename, false);
         return ArchiveStatus<bool>(ArchiveErrors::fileWriteError);
@@ -242,6 +317,8 @@ namespace ECE141 {
             auto theStatus = arcBlockHandler.getAsBlock(theBlock, blockIndex, arcFileStream, blockIndex, *this, StreamType::Archive);
             theStatus.getValue();
             theBlock.header.isEmpty = true;
+            theBlock.header.blockDataLen = 0;
+//            std::memset(theBlock.header.blockFileName, nullChar, sizeof(theBlock.header.blockFileName));
             auto theWriteStatus = arcBlockHandler.writeToStream(theBlock, 0, arcFileStream, blockIndex, *this, StreamType::Archive);
             if(theBlock.header.nextBlockIndex == theBlock.header.blockIndex){
                 notifyObservers(ActionType::removed, aFilename, true);
@@ -249,6 +326,7 @@ namespace ECE141 {
                 return ArchiveStatus<bool>(true);
             }
             blockIndex = theBlock.header.nextBlockIndex;
+            theBlock.header.nextBlockIndex = theBlock.header.blockIndex;
         }
         return ArchiveStatus<bool>(false);
     }
